@@ -1,7 +1,7 @@
 {
-  "name": "@zeddotdev/postgres-context-server",
+  "name": "@dahican/mysql-context-server",
   "version": "0.1.3",
-  "description": "a model context protocol server for postgres",
+  "description": "a model context protocol server for mysql",
   "main": "index.mjs",
   "type": "module",
   "publishConfig": {
@@ -13,17 +13,17 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/zed-industries/postgres-context-server.git"
+    "url": "git+https://github.com/dahican/mysql-context-server.git"
   },
   "author": "",
   "license": "MIT",
   "bugs": {
-    "url": "https://github.com/zed-industries/postgres-context-server/issues"
+    "url": "https://github.com/dahican/mysql-context-server/issues"
   },
-  "homepage": "https://github.com/zed-industries/postgres-context-server#readme",
+  "homepage": "https://github.com/dahican/mysql-context-server#readme",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^0.4.0",
-    "pg": "^8.13.1",
+    "mysql2": "^3.14.1",
     "zod": "^3.23.8"
   }
 }

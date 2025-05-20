@@ -1,3 +1,3 @@
-# postgres-context-server
+# mysql-context-server
 
-This module implements a Model Context Protocol server for a PostgreSQL database.
+This module implements a Model Context Protocol server for a MySQL database.
