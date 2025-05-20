@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import pg from "pg";
+import mysql from "mysql2/promise";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
@@ -14,7 +14,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 
 const server = new Server({
-  name: "postgres-context-server",
+  name: "mysql-context-server",
   version: "0.1.0",
 });
 
@@ -25,33 +25,42 @@ if (typeof databaseUrl == null || databaseUrl.trim().length === 0) {
 }
 
 const resourceBaseUrl = new URL(databaseUrl);
-resourceBaseUrl.protocol = "postgres:";
+resourceBaseUrl.protocol = "mysql:";
 resourceBaseUrl.password = "";
 
 process.stderr.write("starting server. url: " + databaseUrl + "\n");
-const pool = new pg.Pool({
-  connectionString: databaseUrl,
+// Parse the MySQL connection URI and create a pool
+const connectionUrl = new URL(databaseUrl);
+const pool = mysql.createPool({
+  host: connectionUrl.hostname,
+  port: connectionUrl.port || 3306,
+  user: connectionUrl.username,
+  password: connectionUrl.password,
+  database: connectionUrl.pathname.substring(1), // remove leading slash
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0
 });
 
 const SCHEMA_PATH = "schema";
-const SCHEMA_PROMPT_NAME = "pg-schema";
+const SCHEMA_PROMPT_NAME = "mysql-schema";
 const ALL_TABLES = "all-tables";
 
 server.setRequestHandler(ListResourcesRequestSchema, async () => {
-  const client = await pool.connect();
+  const connection = await pool.getConnection();
   try {
-    const result = await client.query(
-      "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'",
+    const [rows] = await connection.query(
+      "SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE()",
     );
     return {
-      resources: result.rows.map((row) => ({
+      resources: rows.map((row) => ({
         uri: new URL(`${row.table_name}/${SCHEMA_PATH}`, resourceBaseUrl).href,
         mimeType: "application/json",
         name: `"${row.table_name}" database schema`,
       })),
     };
   } finally {
-    client.release();
+    connection.release();
   }
 });
 
@@ -66,10 +75,10 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
     throw new Error("Invalid resource URI");
   }
 
-  const client = await pool.connect();
+  const connection = await pool.getConnection();
   try {
-    const result = await client.query(
-      "SELECT column_name, data_type FROM information_schema.columns WHERE table_name = $1",
+    const [rows] = await connection.query(
+      "SELECT column_name, data_type FROM information_schema.columns WHERE table_name = ?",
       [tableName],
     );
 
@@ -78,12 +87,12 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
         {
           uri: request.params.uri,
           mimeType: "application/json",
-          text: JSON.stringify(result.rows, null, 2),
+          text: JSON.stringify(rows, null, 2),
         },
       ],
     };
   } finally {
-    client.release();
+    connection.release();
   }
 });
 
@@ -91,8 +100,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
   return {
     tools: [
       {
-        name: "pg-schema",
-        description: "Returns the schema for a Postgres database.",
+        name: "mysql-schema",
+        description: "Returns the schema for a MySQL database.",
         inputSchema: {
           type: "object",
           properties: {
@@ -131,7 +140,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 });
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  if (request.params.name === "pg-schema") {
+  if (request.params.name === "mysql-schema") {
     const mode = request.params.arguments?.mode;
 
     const tableName = (() => {
@@ -153,41 +162,42 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
     })();
 
-    const client = await pool.connect();
+    const connection = await pool.getConnection();
 
     try {
-      const sql = await getSchema(client, tableName);
+      const sql = await getSchema(connection, tableName);
 
       return {
         content: [{ type: "text", text: sql }],
       };
     } finally {
-      client.release();
+      connection.release();
     }
   }
 
   if (request.params.name === "query") {
     const sql = request.params.arguments?.sql;
 
-    const client = await pool.connect();
+    const connection = await pool.getConnection();
     try {
-      await client.query("BEGIN TRANSACTION READ ONLY");
-      const result = await client.query(sql);
+      // Start a read-only transaction in MySQL
+      await connection.query("SET SESSION TRANSACTION READ ONLY");
+      await connection.query("START TRANSACTION");
+      const [rows] = await connection.query(sql);
       return {
         content: [
-          { type: "text", text: JSON.stringify(result.rows, undefined, 2) },
+          { type: "text", text: JSON.stringify(rows, undefined, 2) },
         ],
       };
     } catch (error) {
       throw error;
     } finally {
-      client
-        .query("ROLLBACK")
+      connection.query("ROLLBACK")
         .catch((error) =>
           console.warn("Could not roll back transaction:", error),
         );
 
-      client.release();
+      connection.release();
     }
   }
 
@@ -209,19 +219,19 @@ server.setRequestHandler(CompleteRequestSchema, async (request) => {
       };
     }
 
-    const client = await pool.connect();
+    const connection = await pool.getConnection();
     try {
-      const result = await client.query(
-        "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'",
+      const [rows] = await connection.query(
+        "SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE()",
       );
-      const tables = result.rows.map((row) => row.table_name);
+      const tables = rows.map((row) => row.table_name);
       return {
         completion: {
           values: [ALL_TABLES, ...tables],
         },
       };
     } finally {
-      client.release();
+      connection.release();
     }
   }
 
@@ -236,7 +246,7 @@ server.setRequestHandler(ListPromptsRequestSchema, async () => {
       {
         name: SCHEMA_PROMPT_NAME,
         description:
-          "Retrieve the schema for a given table in the postgres database",
+          "Retrieve the schema for a given table in the mysql database",
         arguments: [
           {
             name: "tableName",
@@ -259,10 +269,10 @@ server.setRequestHandler(GetPromptRequestSchema, async (request) => {
       throw new Error(`Invalid tableName: ${tableName}`);
     }
 
-    const client = await pool.connect();
+    const connection = await pool.getConnection();
 
     try {
-      const sql = await getSchema(client, tableName);
+      const sql = await getSchema(connection, tableName);
 
       return {
         description:
@@ -280,7 +290,7 @@ server.setRequestHandler(GetPromptRequestSchema, async (request) => {
         ],
       };
     } finally {
-      client.release();
+      connection.release();
     }
   }
 
@@ -290,23 +300,23 @@ server.setRequestHandler(GetPromptRequestSchema, async (request) => {
 /**
  * @param tableNameOrAll {string}
  */
-async function getSchema(client, tableNameOrAll) {
+async function getSchema(connection, tableNameOrAll) {
   const select =
     "SELECT column_name, data_type, is_nullable, column_default, table_name FROM information_schema.columns";
 
-  let result;
+  let rows;
   if (tableNameOrAll === ALL_TABLES) {
-    result = await client.query(
-      `${select} WHERE table_schema NOT IN ('pg_catalog', 'information_schema')`,
+    [rows] = await connection.query(
+      `${select} WHERE table_schema = DATABASE()`,
     );
   } else {
-    result = await client.query(`${select} WHERE table_name = $1`, [
+    [rows] = await connection.query(`${select} WHERE table_name = ?`, [
       tableNameOrAll,
     ]);
   }
 
   const allTableNames = Array.from(
-    new Set(result.rows.map((row) => row.table_name).sort()),
+    new Set(rows.map((row) => row.table_name).sort()),
   );
 
   let sql = "```sql\n";
@@ -317,14 +327,14 @@ async function getSchema(client, tableNameOrAll) {
     }
 
     sql += [
-      `create table "${tableName}" (`,
-      result.rows
+      `CREATE TABLE \`${tableName}\` (`,
+      rows
         .filter((row) => row.table_name === tableName)
         .map((row) => {
-          const notNull = row.is_nullable === "NO" ? "" : " not null";
+          const notNull = row.is_nullable === "NO" ? " NOT NULL" : "";
           const defaultValue =
-            row.column_default != null ? ` default ${row.column_default}` : "";
-          return `    "${row.column_name}" ${row.data_type}${notNull}${defaultValue}`;
+            row.column_default != null ? ` DEFAULT ${row.column_default}` : "";
+          return `    \`${row.column_name}\` ${row.data_type}${notNull}${defaultValue}`;
         })
         .join(",\n"),
       ");",
